@@ -45,8 +45,14 @@ data "aws_availability_zones" "available" {}
 # TGW VPC attachment. If you recreate or rename this VPC, plan against
 # aicentre-iac immediately afterwards.
 module "flip_vpc" {
-  source               = "terraform-aws-modules/vpc/aws"
-  version              = "~> 6.0"
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 6.0"
+  # On the LZA account the network is platform-managed and VPC creation is
+  # SCP-denied — the module's own create flag empties it there (every internal
+  # resource is gated on it, so no NAT/IGW/EIPs either) without changing its
+  # state address for the legacy envs. Consumers read the network from the
+  # locals in network_lza.tf, which switch to data lookups (FLIP#749).
+  create_vpc           = !var.lza_managed_network
   name                 = "flip-vpc"
   azs                  = slice(data.aws_availability_zones.available.names, 0, var.max_azs)
   cidr                 = var.vpc_cidr
@@ -67,7 +73,7 @@ module "flip_vpc" {
 module "ec2_security_group" {
   source        = "./modules/secgroup"
   name          = "ec2-security-group"
-  vpc_id        = module.flip_vpc.vpc_id
+  vpc_id        = local.vpc_id
   description   = "Security group for the FLIP Central Hub SSM bastion (no inbound access)"
   ingress_rules = []
 }
@@ -88,7 +94,7 @@ resource "aws_ec2_tag" "ec2_security_group_flip_sg" {
 module "trust_security_group" {
   source      = "./modules/secgroup"
   name        = "trust-security-group"
-  vpc_id      = module.flip_vpc.vpc_id
+  vpc_id      = local.vpc_id
   description = "Security group for FLIP Trust EC2 instance (no inbound - access via SSM Session Manager and SSM port forwarding)"
 
   ingress_rules = []
@@ -105,7 +111,7 @@ resource "aws_ec2_tag" "trust_security_group_flip_sg" {
 module "rds_security_group" {
   source      = "./modules/secgroup"
   name        = "rds-security-group"
-  vpc_id      = module.flip_vpc.vpc_id
+  vpc_id      = local.vpc_id
   description = "Security group for FLIP RDS instance"
   ingress_rules = [
     {
@@ -132,8 +138,12 @@ resource "aws_ec2_tag" "rds_security_group_flip_sg" {
 ############################
 
 resource "aws_db_subnet_group" "flip_db_subnet_group" {
-  name       = "flip-db-subnet-group"
-  subnet_ids = module.flip_vpc.private_subnets
+  name = "flip-db-subnet-group"
+  # Data subnets: on the LZA network these are the fully-isolated (local-routes
+  # only) subnets — RDS never initiates outbound traffic, and the proxy /
+  # bastion reach it over intra-VPC routing. On legacy these are the private
+  # subnets, unchanged (see network_lza.tf).
+  subnet_ids = local.data_subnet_ids
 }
 
 module "flip_db" {
@@ -294,7 +304,7 @@ resource "aws_instance" "ec2_instance" {
   tags = {
     Name = "Ec2Instance"
   }
-  subnet_id                   = module.flip_vpc.private_subnets[0]
+  subnet_id                   = local.app_subnet_ids[0]
   associate_public_ip_address = false
   instance_type               = "t3.micro"
   ami                         = data.aws_ssm_parameter.ubuntu.value
@@ -338,7 +348,7 @@ resource "aws_instance" "ec2_instance" {
 module "alb_security_group" {
   source        = "./modules/secgroup"
   name          = "alb-security-group"
-  vpc_id        = module.flip_vpc.vpc_id
+  vpc_id        = local.vpc_id
   description   = "Security group for FLIP ALB"
   ingress_rules = []
 }
@@ -352,9 +362,9 @@ resource "aws_ec2_tag" "alb_security_group_flip_sg" {
 module "alb" {
   source                     = "terraform-aws-modules/alb/aws"
   name                       = "flip-alb"
-  vpc_id                     = module.flip_vpc.vpc_id
+  vpc_id                     = local.vpc_id
   internal                   = true
-  subnets                    = module.flip_vpc.private_subnets
+  subnets                    = local.app_subnet_ids
   security_groups            = [module.alb_security_group.security_group.id]
   enable_deletion_protection = false
 
@@ -398,7 +408,7 @@ module "fl_server_nlb" {
   source                     = "terraform-aws-modules/alb/aws"
   name                       = "flip-fl-server-nlb"
   load_balancer_type         = "network"
-  vpc_id                     = module.flip_vpc.vpc_id
+  vpc_id                     = local.vpc_id
   subnets                    = module.flip_vpc.public_subnets
   enable_deletion_protection = false
   create_security_group      = true
@@ -476,7 +486,7 @@ resource "aws_lb_target_group" "ecs_fl_server_tcp" {
   port        = var.FL_SERVER_PORT
   protocol    = "TCP"
   target_type = "ip"
-  vpc_id      = module.flip_vpc.vpc_id
+  vpc_id      = local.vpc_id
 
   health_check {
     enabled             = true
@@ -514,7 +524,7 @@ resource "aws_lb_target_group" "ecs_flip_api" {
   port        = local.api_container_port
   protocol    = "HTTP"
   target_type = "ip"
-  vpc_id      = module.flip_vpc.vpc_id
+  vpc_id      = local.vpc_id
 
   health_check {
     enabled  = true
@@ -609,8 +619,8 @@ output "SsmCommand" {
 }
 
 output "NatGatewayPublicIp" {
-  description = "NAT Gateway public IP (Central Hub outbound traffic source)"
-  value       = module.flip_vpc.nat_public_ips[0]
+  description = "NAT Gateway public IP (Central Hub outbound traffic source; null on the LZA platform-managed network, where egress is via the Network account — FLIP#749)"
+  value       = var.lza_managed_network ? null : module.flip_vpc.nat_public_ips[0]
 }
 
 output "TrustEc2InstanceId" {
@@ -712,7 +722,7 @@ module "trust_ec2" {
   name_prefix   = "trust"
   instance_type = "t3.xlarge"
   key_name      = aws_key_pair.host_key.key_name
-  subnet_id     = element(module.flip_vpc.private_subnets, 0)
+  subnet_id     = element(local.app_subnet_ids, 0)
 
   # use the trust SG, not the central EC2 SG
   security_group_ids = [module.trust_security_group.security_group.id]
