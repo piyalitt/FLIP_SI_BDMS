@@ -152,8 +152,14 @@ Delete Project
    Projects can be deleted at any time, but:
 
    - Any running training sessions will be deleted and no longer accessible
-   - Images associated with the project will be deleted from XNAT
-   - The project will no longer be visible within XNAT
+   - Imaging already pulled to each Trust is **deliberately retained** in that Trust's XNAT. Deleting a project
+     is a soft delete: the platform record is kept and the deletion audited, but the imaging is not touched.
+     Images could be re-pulled from PACS, whereas the segmentations, contours and annotations added during
+     data enrichment could not — so a project deletion never destroys them
+   - The project therefore remains visible within XNAT to users with access to it there, and is no longer
+     reachable through FLIP
+   - Removing a Trust's imaging is a **separate administrator action**, carried out at the Trust, and is not
+     part of deleting a project
 
 1. Select 'Edit Project'
 2. Under 'Advanced Options', click the 'Delete Project' button
@@ -499,6 +505,10 @@ When model files have been uploaded, you will then need to confirm that the data
 
    You must confirm the data enrichment step is complete (even if no enrichment of the dataset was required and/or actually performed) before training can commence.
 
+.. important::
+
+   If your model trains against labels that are **not** in :term:`OMOP` — segmentation masks and other image-derived annotations — those must be uploaded into each Trust's XNAT *before* you confirm this step, or training will start and then fail with no usable samples. Labels that *are* in OMOP, such as a lab result or a coded report finding, need no upload: project them as a column in your cohort query instead. See :ref:`data-enrichment` for both routes.
+
 1. Navigate to project page
 2. On the right-hand side, toggle the button to confirm the dataset has been enriched
 3. Click the 'Initiate Training' button to start the training cycle
@@ -572,7 +582,15 @@ Hovering over the graphs at various points will display the values.
 Connection Status
 *****************
 
-The Connection Status page shows the live state of the federation. Each participating Trust is shown as online, degraded or offline based on its most recent heartbeat, and can be viewed as a list or as a radial topology.
+The Connection Status page shows the live state of the federation. Each participating Trust reports the health of its core platform services (trust-api, data-access-api, imaging-api, XNAT, OMOP and the PACS/DICOM link), and its state is derived from those reports: Offline when the Trust has stopped sending heartbeats, Degraded when any other service is down or degraded, otherwise Online. The list can also be viewed as a radial topology.
+
+The Services column shows one status dot per container. Clicking a Trust row opens a detail drawer listing each container's status, running version and probe response time — so you can see *why* a Trust is degraded without access to the Trust's own network. The page and the drawer are available to every signed-in user, not only administrators: if a project stalls, you can check whether the Trust holding your data is reporting a failing service before raising it with the platform team. A Trust that has not reported container health (or whose report has gone stale) shows grey "No data" markers and falls back to heartbeat-only state.
+
+.. figure:: ../assets/flip/connection-status-drawer.png
+   :width: 600
+   :align: center
+
+   The Trust detail drawer: this Trust is Degraded because its XNAT is unreachable.
 
 The FL nets card reports the FL client-to-server connectivity for each net — that is, whether each Trust's FL client is connected. No training requests can be sent to a Trust whose FL client is offline.
 
@@ -580,4 +598,4 @@ The FL nets card reports the FL client-to-server connectivity for each net — t
    :width: 600
    :align: center
 
-   Viewing the federation connection status.
+   Viewing the federation connection status and a Trust's container health.

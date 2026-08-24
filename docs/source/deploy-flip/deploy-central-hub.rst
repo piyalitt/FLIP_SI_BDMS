@@ -37,7 +37,7 @@ Prerequisites
 
 1. **AWS CLI configured with SSO access** — see `deploy/README.md <https://github.com/londonaicentre/FLIP/blob/main/deploy/README.md>`_.
 2. **Terraform >= 1.13.1** (or OpenTofu).
-3. **Python 3.12+** with `UV <https://docs.astral.sh/uv/guides/install-python/>`_.
+3. **Python 3.12 or 3.13** with `UV <https://docs.astral.sh/uv/guides/install-python/>`_.
 4. **GitHub CLI** — needed to authenticate against GitHub Container Registry for image pulls.
 5. **SSH key pair** at ``~/.ssh/host-aws`` — uploaded to AWS and used as the
    identity file for the SSM ProxyCommand-based SSH config.
@@ -227,8 +227,7 @@ Flower) share a wire contract for training metrics and logs. The metrics and log
   training in the gap.
 
 This pairs with the ``flip-utils`` package that adds the trust-internal service-key header to the
-``flip`` client wrappers (see the **Trust-internal Service Authentication** section in the repo-root
-``CLAUDE.md``).
+``flip`` client wrappers (see :ref:`trust-internal-service-authentication`).
 
 ************
 Email setup
