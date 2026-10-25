@@ -189,6 +189,14 @@ Things worth knowing before touching any of it:
   it was deleted when `aws-stag` was repointed at LZA staging (2026-10-05), so
   all three staging legs run against LZA staging. The guards remain for the next teardown;
   `.github/tests/workflows/test_terraform_stag_pause.py` pins them.
+- **An unseeded GitHub environment skips plan, apply and drift** instead of
+  failing in `configure-aws-credentials` (`Input required and not supplied:
+  aws-region`). `scripts/terraform-ci-gate.sh` treats "no role, no `TF_HUB`, no
+  state bucket" as never seeded — a fork does not inherit `aws-stag` /
+  `aws-prod` — and skips the AWS steps. A role missing while `TF_HUB` or
+  `FLIP_TFSTATE_BUCKET_NAME` is still set fails the job. A set role with a blank
+  `AWS_REGION` uses `eu-west-2`. `.github/tests/workflows/test_terraform_ci_unconfigured.py`
+  pins the step guards.
 - **Every IAM role this root owns carries a permissions boundary**
   (`var.iam_permissions_boundary_name`, the policy declared by
   `modules/terraform_ci_bootstrap`). The CI apply role may only create a role, or

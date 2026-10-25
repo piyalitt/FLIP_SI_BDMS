@@ -82,12 +82,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # Unseeded environment: no role, no TF_HUB, no state bucket. Skipping here
+      # is what keeps an unseeded repository's plan, apply and drift jobs from
+      # failing inside configure-aws-credentials ("Input required and not
+      # supplied: aws-region").
+      # A half-configured environment still fails. See terraform-ci-gate.sh.
+      #
+      # Bracket syntax is load-bearing. setup-github-environments.sh harvests
+      # `KEY: ${{ vars.NAME }}` lines and treats NAME as an env-file input.
+      # The role ARN is written from IAM, not from that file, so a dotted
+      # `vars.TF_PLAN_ROLE_ARN` here would make a seeded environment look stale.
+      - name: Check whether Terraform CI is configured
+        id: tf-ci
+        env:
+          ROLE_ARN: ${{ vars['TF_PLAN_ROLE_ARN'] }}
+          AWS_REGION: ${{ vars['AWS_REGION'] }}
+          TF_HUB: ${{ vars['TF_HUB'] }}
+          STATE_BUCKET: ${{ vars['FLIP_TFSTATE_BUCKET_NAME'] }}
+          ROLE_VAR: TF_PLAN_ROLE_ARN
+        run: deploy/providers/AWS/scripts/terraform-ci-gate.sh
+
       - name: Configure AWS credentials
+        if: steps.tf-ci.outputs.run == 'true'
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.TF_PLAN_ROLE_ARN }}
           role-session-name: flip-tf-plan-${{ github.run_id }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-2' }}
 
       # Read the tags the staging services are running, rather than the
       # configured mutable ones. RESOLVE_SHA_TAG=false skips the GHCR probe
@@ -96,6 +117,7 @@ jobs:
       # DOCKER_TAG / DOCKER_FL_TAG reach the compose step below through
       # $GITHUB_ENV, which is why they are absent from its `env:` block.
       - name: Resolve the image tags the services are running
+        if: steps.tf-ci.outputs.run == 'true'
         env:
           GIT_SHA: ${{ github.event.pull_request.head.sha }}
           DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
@@ -110,6 +132,7 @@ jobs:
       # definition of how env values map onto Terraform inputs — see the script's
       # header, and `make print-tf-env` below.
       - name: Compose the Terraform env file
+        if: steps.tf-ci.outputs.run == 'true'
         env:
           # The estate: TF_HUB (stag | prod) on the environment. No fallback, so an
           # unset TF_HUB fails this step instead of composing some default estate.
@@ -120,7 +143,7 @@ jobs:
           # produce is one nobody asked for. Literal rather than ref-derived: plans
           # are staging-only by construction.
           EXPECTED_ENV_CLASS: stag
-          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
           FLIP_TFSTATE_BUCKET_NAME: ${{ vars.FLIP_TFSTATE_BUCKET_NAME }}
           AICENTRE_BUCKET_NAME: ${{ vars.AICENTRE_BUCKET_NAME }}
           FLIP_APP_BUNDLES_BUCKET_NAME: ${{ vars.FLIP_APP_BUNDLES_BUCKET_NAME }}
@@ -170,6 +193,7 @@ jobs:
       # from what is actually in state; Terraform itself declares the parameter
       # (aws_ssm_parameter.ci_host_aws_public_key in parameter_store.tf).
       - name: Write the EC2 keypair public key
+        if: steps.tf-ci.outputs.run == 'true'
         run: |
           mkdir -p "$HOME/.ssh"
           if ! aws ssm get-parameter \
@@ -183,6 +207,7 @@ jobs:
           chmod 600 "$HOME/.ssh/host-aws.pub"
 
       - name: Setup Terraform
+        if: steps.tf-ci.outputs.run == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "~> 1.13"
@@ -193,6 +218,7 @@ jobs:
       # selection). tf-via-pr calls terraform directly, so hand it those values
       # rather than re-deriving them here and drifting from a laptop plan.
       - name: Export the Terraform variables
+        if: steps.tf-ci.outputs.run == 'true'
         working-directory: deploy/providers/AWS
         env:
           # The compose step's HUB, so `make` reads the env file it wrote and maps
@@ -201,11 +227,12 @@ jobs:
         run: make --no-print-directory print-tf-env >> "$GITHUB_ENV"
 
       - name: Terraform plan
+        if: steps.tf-ci.outputs.run == 'true'
         uses: op5dev/tf-via-pr@39ed2635c056ca408ed24cc5c2baf0ef4381a7a5 # v13.7.4
         with:
           command: plan
           working-directory: deploy/providers/AWS
-          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION }}
+          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION || 'eu-west-2' }}
           # Never take the state lock for a PR plan: an operator mid-`make apply`
           # must not be blocked by someone else opening a pull request.
           arg-lock: false
@@ -237,6 +264,7 @@ jobs:
       # annotation lands on the PR's checks beside the tf-via-pr plan comment;
       # the detail goes to the job summary.
       - name: Advisory — LZA FL ingress and FL impact
+        if: steps.tf-ci.outputs.run == 'true'
         continue-on-error: true
         working-directory: deploy/providers/AWS
         env:

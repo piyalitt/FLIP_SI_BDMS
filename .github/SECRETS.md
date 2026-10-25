@@ -98,6 +98,10 @@ that consumes them: `deploy/providers/AWS/README.md` → "Terraform CI: plan on 
 apply on merge" and "Repointing CI at the LZA accounts". Seeding is done by
 `deploy/providers/AWS/scripts/setup-github-environments.sh --hub <stag|prod>` (repo
 admin, `--dry-run` first, from a machine holding the operator's `.env.<env>` file).
+Until that environment has a role, `TF_HUB` and a state bucket, the plan, apply
+and drift jobs skip AWS and stay green (`scripts/terraform-ci-gate.sh`) rather
+than failing on an empty `aws-region`. `AWS_REGION` falls back to `eu-west-2`
+once the role is set.
 
 ## Security Notes
 
