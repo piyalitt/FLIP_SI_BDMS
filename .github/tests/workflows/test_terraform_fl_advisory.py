@@ -44,6 +44,10 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / "workflows"
 SCRIPT_NAME = "check-fl-plan-impact.sh"
 SCRIPT = f"scripts/{SCRIPT_NAME}"
 QUIESCED_IF = "github.event_name == 'workflow_dispatch' && inputs.fl_quiesced"
+# Shared with the holding gate and the quiesced advisory: an unseeded GitHub
+# environment skips both, because there is no plan to hold or to advise on.
+# Stripped before the two FL predicates are compared, so they stay inverses.
+RUN_IF = "steps.tf-ci.outputs.run == 'true'"
 
 # An *invocation*, not a mention: the quiesce-attestation step names the script inside a warning
 # annotation, and counting that as a call would make the gate look duplicated. Any path shape counts
@@ -107,6 +111,18 @@ def condition(step: str) -> str:
     if raw.startswith("${{") and raw.endswith("}}"):
         raw = raw[3:-2].strip()
     return raw
+
+
+def fl_condition(step: str) -> str:
+    """The FL predicate, after the unseeded-environment conjunction.
+
+    Both the holding gate and the quiesced advisory carry ``RUN_IF``. What they
+    decide about FL is the remainder, and those two remainders are inverses.
+    """
+    raw = condition(step)
+    prefix = f"{RUN_IF} && "
+    assert raw.startswith(prefix), raw
+    return raw[len(prefix) :]
 
 
 def script_steps(workflow: str) -> list[str]:
@@ -180,7 +196,7 @@ class ApplyWorkflowKeepsTheAdvisoryOnARedispatch(unittest.TestCase):
         gates = [s for s in self.found if not is_advisory_only(s)]
         assert len(gates) == 1, f"expected one holding gate step, found {[name_of(s) for s in gates]}"
         changed = f"the FL gate's condition changed: {condition(gates[0])!r}"
-        assert condition(gates[0]) == f"!({QUIESCED_IF})", changed
+        assert fl_condition(gates[0]) == f"!({QUIESCED_IF})", changed
 
     def test_a_quiesced_redispatch_still_emits_the_advisory(self) -> None:
         advisories = [s for s in self.found if is_advisory_only(s)]
@@ -198,7 +214,7 @@ class ApplyWorkflowKeepsTheAdvisoryOnARedispatch(unittest.TestCase):
         gate = next(s for s in self.found if not is_advisory_only(s))
         quiesced = [s for s in self.found if is_advisory_only(s) and QUIESCED_IF in condition(s)]
         assert quiesced, "no quiesced advisory step to compare against"
-        assert condition(gate) == f"!({condition(quiesced[0])})", (
+        assert fl_condition(gate) == f"!({fl_condition(quiesced[0])})", (
             "the gate and the quiesced advisory must cover exactly complementary runs"
         )
 

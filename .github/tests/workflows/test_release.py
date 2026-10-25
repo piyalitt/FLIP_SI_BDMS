@@ -592,7 +592,12 @@ class TerraformApplyTakesTheReleaseTag(unittest.TestCase):
         assert "fl_quiesced:" in self.text
         gate = step_block(self.text, "Check the plan for FL impact")
         assert "scripts/check-fl-plan-impact.sh tfplan.json" in gate
-        assert "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.fl_quiesced) }}" in gate
+        # ANDed with the unseeded-environment skip. The quiesce predicate itself
+        # is unchanged: a workflow_dispatch with fl_quiesced still skips the hold.
+        assert (
+            "if: ${{ steps.tf-ci.outputs.run == 'true' && "
+            "!(github.event_name == 'workflow_dispatch' && inputs.fl_quiesced) }}"
+        ) in gate
 
     def test_the_release_tag_is_validated(self) -> None:
         step = step_block(self.text, "Validate the release tag")
