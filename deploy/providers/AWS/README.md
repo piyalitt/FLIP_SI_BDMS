@@ -1282,8 +1282,21 @@ the plan-time advisory (plan) can read it. That never leaves the job.
 
 ### Reading a red Terraform CI run
 
-Two of these are not faults, and both now say so in the run's summary rather than
+Three of these are not faults, and each says so in the run's summary rather than
 only in the log.
+
+**"Terraform CI is not configured."** The job's GitHub environment has no OIDC
+role, no `TF_HUB` and no state bucket — a fork, or `aws-stag` / `aws-prod`
+created empty. `configure-aws-credentials` would otherwise fail with
+`Input required and not supplied: aws-region`, because `vars.AWS_REGION` is
+empty and that input is required. `scripts/terraform-ci-gate.sh` skips the AWS
+steps and the job stays green. A *half-configured* environment is different and
+still fails: if `TF_HUB` or `FLIP_TFSTATE_BUCKET_NAME` is set but the role
+(`TF_PLAN_ROLE_ARN` for plan and drift, `TF_APPLY_ROLE_ARN` for apply) is not,
+skipping would turn a wiped role into a green apply that applied nothing. When
+the role is set and `AWS_REGION` is not, the workflows use `eu-west-2` (the
+region this stack is written for) and the gate warns. Seed with
+`scripts/setup-github-environments.sh`.
 
 **"Apply held — FL infrastructure would be disturbed."** The plan succeeded and
 was deliberately not applied, because it would recreate `fl-server-net-1` /

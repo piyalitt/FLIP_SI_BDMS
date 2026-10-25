@@ -165,14 +165,36 @@ jobs:
             { echo "::error::${RELEASE_TAG} is ${TAG_SHA}, but this run is applying ${GITHUB_SHA} — main moved on after the tag was cut. Applying ${RELEASE_TAG}'s images over newer code would roll production back; cut a release from ${GITHUB_SHA} instead."; exit 1; }
           echo "Pinning release ${RELEASE_TAG} (${TAG_SHA})."
 
+      # Unseeded environment: no role, no TF_HUB, no state bucket. Skipping here
+      # is what keeps an unseeded repository's plan, apply and drift jobs from
+      # failing inside configure-aws-credentials ("Input required and not
+      # supplied: aws-region").
+      # A half-configured environment still fails. See terraform-ci-gate.sh.
+      #
+      # Bracket syntax is load-bearing. setup-github-environments.sh harvests
+      # `KEY: ${{ vars.NAME }}` lines and treats NAME as an env-file input.
+      # The role ARN is written from IAM, not from that file, so a dotted
+      # `vars.TF_APPLY_ROLE_ARN` here would make a seeded environment look stale.
+      - name: Check whether Terraform CI is configured
+        id: tf-ci
+        env:
+          ROLE_ARN: ${{ vars['TF_APPLY_ROLE_ARN'] }}
+          AWS_REGION: ${{ vars['AWS_REGION'] }}
+          TF_HUB: ${{ vars['TF_HUB'] }}
+          STATE_BUCKET: ${{ vars['FLIP_TFSTATE_BUCKET_NAME'] }}
+          ROLE_VAR: TF_APPLY_ROLE_ARN
+        run: deploy/providers/AWS/scripts/terraform-ci-gate.sh
+
       - name: Configure AWS credentials
+        if: steps.tf-ci.outputs.run == 'true'
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.TF_APPLY_ROLE_ARN }}
           role-session-name: flip-tf-apply-${{ github.run_id }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-west-2' }}
 
       - name: Log in to GHCR
+        if: steps.tf-ci.outputs.run == 'true'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # This workflow fires on `deploy/providers/AWS/**`; the image builds fire on
@@ -184,6 +206,7 @@ jobs:
       # single budget, so the worst case is two waits, not three. So the budget is
       # spent only when this push actually touched a path that builds one of them.
       - name: Decide how long to wait for this commit's images
+        if: steps.tf-ci.outputs.run == 'true'
         id: wait
         env:
           BEFORE: ${{ github.event.before }}
@@ -222,6 +245,7 @@ jobs:
       # published (an infrastructure-only merge) it reuses what the services are
       # already running, never the mutable tag.
       - name: Resolve the image tags to pin
+        if: steps.tf-ci.outputs.run == 'true'
         env:
           GIT_SHA: ${{ github.sha }}
           # Empty on every path but a release dispatch, which is exactly the
@@ -238,6 +262,7 @@ jobs:
       # they are inherited from the step above via $GITHUB_ENV. Setting them from
       # `vars` here would override the resolved values and reintroduce hazard A.
       - name: Compose the Terraform env file
+        if: steps.tf-ci.outputs.run == 'true'
         env:
           # The estate: TF_HUB (stag | prod) on the environment. No fallback, so an
           # unset TF_HUB fails this step instead of composing some default estate.
@@ -250,7 +275,7 @@ jobs:
           # true — then applies it unattended on main. With this, that is a red
           # compose step instead of a plan someone has to read closely.
           EXPECTED_ENV_CLASS: ${{ github.ref_name == 'main' && 'prod' || 'stag' }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
           FLIP_TFSTATE_BUCKET_NAME: ${{ vars.FLIP_TFSTATE_BUCKET_NAME }}
           AICENTRE_BUCKET_NAME: ${{ vars.AICENTRE_BUCKET_NAME }}
           FLIP_APP_BUNDLES_BUCKET_NAME: ${{ vars.FLIP_APP_BUNDLES_BUCKET_NAME }}
@@ -294,6 +319,7 @@ jobs:
         run: deploy/providers/AWS/scripts/compose-ci-env.sh
 
       - name: Write the EC2 keypair public key
+        if: steps.tf-ci.outputs.run == 'true'
         run: |
           mkdir -p "$HOME/.ssh"
           if ! aws ssm get-parameter \
@@ -307,12 +333,14 @@ jobs:
           chmod 600 "$HOME/.ssh/host-aws.pub"
 
       - name: Setup Terraform
+        if: steps.tf-ci.outputs.run == 'true'
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "~> 1.13"
           terraform_wrapper: false
 
       - name: Export the Terraform variables
+        if: steps.tf-ci.outputs.run == 'true'
         working-directory: deploy/providers/AWS
         env:
           # The compose step's HUB, so `make` reads the env file it wrote and maps
@@ -324,11 +352,12 @@ jobs:
       # fresh plan: the gate below has to inspect the same plan that gets applied,
       # or it is checking something else.
       - name: Terraform plan
+        if: steps.tf-ci.outputs.run == 'true'
         uses: op5dev/tf-via-pr@39ed2635c056ca408ed24cc5c2baf0ef4381a7a5 # v13.7.4
         with:
           command: plan
           working-directory: deploy/providers/AWS
-          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION }}
+          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION || 'eu-west-2' }}
           validate: true
           format: true
           # preserve-plan keeps the file in the working directory, which the FL
@@ -346,7 +375,7 @@ jobs:
       # Hazard B. Exit 1 holds the deploy with the resources named; exit 2 means
       # the plan could not be read, which is also a hold — never an apply.
       - name: Check the plan for FL impact
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.fl_quiesced) }}
+        if: ${{ steps.tf-ci.outputs.run == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.fl_quiesced) }}
         working-directory: deploy/providers/AWS
         run: |
           terraform show -json tfplan > tfplan.json
@@ -364,7 +393,7 @@ jobs:
       # unexpected plan shape, a jq error, a future selector bug — must not take
       # away the one documented way past a gate that is holding or failing.
       - name: Emit the plan advisories (FL gate skipped)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.fl_quiesced }}
+        if: ${{ steps.tf-ci.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && inputs.fl_quiesced }}
         continue-on-error: true
         working-directory: deploy/providers/AWS
         env:
@@ -379,7 +408,7 @@ jobs:
       # GET /fl/quiesce. It is recorded as a warning annotation with the actor's
       # name so the attestation is attributable after the fact.
       - name: Record the FL-quiesce attestation
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.fl_quiesced }}
+        if: ${{ steps.tf-ci.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && inputs.fl_quiesced }}
         env:
           ACTOR: ${{ github.actor }}
         run: |
@@ -389,15 +418,17 @@ jobs:
       # tf-via-pr moves `plan-file` onto its own working path, so hand it a copy
       # rather than the file it is about to overwrite.
       - name: Stage the reviewed plan
+        if: steps.tf-ci.outputs.run == 'true'
         working-directory: deploy/providers/AWS
         run: cp tfplan tfplan.gated
 
       - name: Terraform apply
+        if: steps.tf-ci.outputs.run == 'true'
         uses: op5dev/tf-via-pr@39ed2635c056ca408ed24cc5c2baf0ef4381a7a5 # v13.7.4
         with:
           command: apply
           working-directory: deploy/providers/AWS
-          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION }}
+          arg-backend-config: bucket=${{ vars.FLIP_TFSTATE_BUCKET_NAME }},region=${{ vars.AWS_REGION || 'eu-west-2' }}
           plan-file: deploy/providers/AWS/tfplan.gated
           # Belt and braces. Today tf-via-pr only uploads for `command: plan`, so
           # this step would not publish anything — but the state-in-plaintext
